@@ -6,14 +6,25 @@
 //! 聚合方式（与任务管理器一致）：
 //!   1. 同一个物理引擎上，所有进程的占用求和
 //!   2. 同一块显卡上，取各引擎的最大值作为该显卡占用
+//!
+//! Windows 会把虚拟/间接显示驱动（远程桌面、向日葵、安卓模拟器等）也当成一个 GPU 适配器
+//! 上报，它们的引擎数很多但永远没有负载，会显示成一个恒为 0% 的假显卡。
+//! 这里用 `\GPU Adapter Memory` 的总提交显存把它们剔除：真显卡是 GB 级，虚拟卡只有几 MB。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use windows::core::w;
 use windows::Win32::System::Performance::*;
+
+/// 低于此总提交显存（字节）的适配器视为虚拟显卡，不显示
+const MIN_COMMITTED: f64 = 64.0 * 1024.0 * 1024.0;
 
 pub struct GpuMonitor {
     query: isize,
     counter: isize,
+    /// (query, counter)：显存查询，用于识别真显卡
+    mem: Option<(isize, isize)>,
+    /// 有实际显存的适配器 luid 集合；None = 查不到显存信息，不做过滤
+    real: Option<HashSet<String>>,
 }
 
 impl GpuMonitor {
@@ -37,7 +48,11 @@ impl GpuMonitor {
             }
             // 先采一次基准值，下次采样才有有效数据
             PdhCollectQueryData(query);
-            Some(Self { query, counter })
+
+            let mem = open_mem_query();
+            let real = mem.map(|(q, c)| real_adapters(q, c));
+
+            Some(Self { query, counter, mem, real })
         }
     }
 
@@ -70,13 +85,68 @@ impl GpuMonitor {
 
         let mut list: Vec<_> = adapters.into_iter().collect();
         list.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // 去掉没有显存的虚拟显卡；若过滤后一块都不剩（阈值或计数器异常），保留原列表
+        if let Some(real) = &self.real {
+            if list.len() > 1 {
+                let kept: Vec<_> = list
+                    .iter()
+                    .filter(|(luid, _)| real.contains(luid))
+                    .cloned()
+                    .collect();
+                if !kept.is_empty() {
+                    list = kept;
+                }
+            }
+        }
+
         list.into_iter().map(|(_, v)| v.clamp(0.0, 100.0)).collect()
     }
+}
+
+/// 打开 `\GPU Adapter Memory(*)\Total Committed`，失败返回 None（不做过滤）
+unsafe fn open_mem_query() -> Option<(isize, isize)> {
+    let mut query = 0isize;
+    if PdhOpenQueryW(None, 0, &mut query) != 0 {
+        return None;
+    }
+    let mut counter = 0isize;
+    let r = PdhAddEnglishCounterW(
+        query,
+        w!("\\GPU Adapter Memory(*)\\Total Committed"),
+        0,
+        &mut counter,
+    );
+    if r != 0 {
+        PdhCloseQuery(query);
+        return None;
+    }
+    PdhCollectQueryData(query);
+    Some((query, counter))
+}
+
+/// 收集「总提交显存达到阈值」的适配器 luid
+unsafe fn real_adapters(query: isize, counter: isize) -> HashSet<String> {
+    let _ = PdhCollectQueryData(query);
+    read_array(counter)
+        .into_iter()
+        .filter_map(|(name, v)| {
+            if v < MIN_COMMITTED {
+                return None;
+            }
+            let a = name.find("luid_")?;
+            let b = name.find("_phys_")?;
+            Some(name[a + 5..b].to_string())
+        })
+        .collect()
 }
 
 impl Drop for GpuMonitor {
     fn drop(&mut self) {
         unsafe {
+            if let Some((q, _)) = self.mem {
+                PdhCloseQuery(q);
+            }
             PdhCloseQuery(self.query);
         }
     }

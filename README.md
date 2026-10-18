@@ -8,9 +8,10 @@
 - **几乎不占资源**：进程优先级设为低于普通（`BELOW_NORMAL_PRIORITY_CLASS`）；闲时的 `GetMessageW` 会让线程休眠；显示数值没有变化时不重绘窗口。
 - **CPU 采样零开销**：基于 `GetSystemTimes` 两次读数做差，不使用 PDH / WMI。
 - **GPU 数据与任务管理器同源**：读取性能计数器 `\GPU Engine(*)\Utilization Percentage`，对同一物理引擎上各进程的占用求和、对同一显卡取各引擎最大值，聚合方式与任务管理器一致。
-- **多显卡支持**：自动识别显卡数量，显示为 `GPU0` / `GPU1`…；无可用数据时显示 `GPU N/A`。
+- **多显卡支持**：自动识别显卡数量，显示为 `GPU0` / `GPU1`…；无可用数据时显示 `GPU N/A`。虚拟/间接显示驱动（远程桌面、远控软件、安卓模拟器等）会被自动排除，不会出现恒为 0% 的假显卡。
 - **高占用高亮**：占用达到 95% 及以上时，该格子的数字与标签胶囊自动转为红色。
-- **双缓冲绘制**：兼容 DC + 兼容位图 + `BitBlt`，不会出现闪烁。
+- **双缓冲绘制**：分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`）+ GDI+ 抗锯齿，圆角与文字逐像素平滑，无边缘毛刺。
+- **进程名规范**：exe 与任务管理器中显示的应用名统一为 `AAsysmon`（版本信息 `FileDescription` 由 `build.rs` 写入）。
 
 ## 运行环境
 
@@ -33,7 +34,7 @@ cargo build --release
 cargo run --release
 ```
 
-发布构建的可执行文件位于 `target\release\sysmon.exe`，双击即可运行。
+发布构建的可执行文件位于 `target\release\AAsysmon.exe`，程序图标由 `build.rs` 在构建期通过 `winresource` 嵌入（`assets/icon.ico`），双击即可运行。
 
 程序没有控制台窗口，也没有托盘图标：**关闭方式是在悬浮窗上点击右键，选择「退出」**。
 
@@ -50,9 +51,13 @@ cargo run --release
 
 ```
 src/
-├── main.rs   # Win32 窗口、消息循环、GDI 绘制、布局与状态管理
+├── main.rs   # Win32 分层窗口、消息循环、布局与状态管理
+├── render.rs # GDI+ 抗锯齿渲染（分层表面、圆角矩形、居中文字）
 ├── cpu.rs    # CPU 占用统计（GetSystemTimes 差分）
-└── gpu.rs    # GPU 占用统计（PDH 性能计数器 + 实例聚合）
+└── gpu.rs    # GPU 占用统计（PDH 性能计数器 + 实例聚合 + 虚拟显卡过滤）
+build.rs      # 构建期把 assets/icon.ico 与版本信息嵌入 exe（winresource 调用 rc.exe）
+assets/
+└── icon.ico  # 程序图标（16~256 像素多尺寸）
 ```
 
 整份代码仅三个源文件。`main.rs` 顶部的常量集中了全部外观参数：刷新间隔、格子宽度、圆角半径、配色等，修改那里即可调整视觉效果，不必改动绘制逻辑。
