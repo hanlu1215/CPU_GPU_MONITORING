@@ -1,0 +1,66 @@
+# sysmon
+
+一个极轻量的 Windows 桌面挂件：无边框、置顶的最小悬浮窗，每秒实时显示 CPU 与 GPU 占用百分比。
+
+## 特性
+
+- **零第三方框架**：直接调用原生 Win32 API，唯一依赖是微软官方的 `windows` crate。
+- **几乎不占资源**：进程优先级设为低于普通（`BELOW_NORMAL_PRIORITY_CLASS`）；闲时的 `GetMessageW` 会让线程休眠；显示数值没有变化时不重绘窗口。
+- **CPU 采样零开销**：基于 `GetSystemTimes` 两次读数做差，不使用 PDH / WMI。
+- **GPU 数据与任务管理器同源**：读取性能计数器 `\GPU Engine(*)\Utilization Percentage`，对同一物理引擎上各进程的占用求和、对同一显卡取各引擎最大值，聚合方式与任务管理器一致。
+- **多显卡支持**：自动识别显卡数量，显示为 `GPU0` / `GPU1`…；无可用数据时显示 `GPU N/A`。
+- **高占用高亮**：占用达到 95% 及以上时，该格子的数字与标签胶囊自动转为红色。
+- **双缓冲绘制**：兼容 DC + 兼容位图 + `BitBlt`，不会出现闪烁。
+
+## 运行环境
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 1709 及以上 |
+| 显卡驱动 | WDDM 2.x 及以上（低于此版本时 GPU 数据不可用，显示 `N/A`，CPU 统计仍正常） |
+| 工具链 | Rust（edition 2021），Windows MSVC target |
+
+## 构建与运行
+
+```bash
+# 调试构建
+cargo build
+
+# 发布构建（推荐，LTO + strip，体积最小）
+cargo build --release
+
+# 直接运行
+cargo run --release
+```
+
+发布构建的可执行文件位于 `target\release\sysmon.exe`，双击即可运行。
+
+程序没有控制台窗口，也没有托盘图标：**关闭方式是在悬浮窗上点击右键，选择「退出」**。
+
+## 使用说明
+
+| 操作 | 效果 |
+| --- | --- |
+| 按住左键拖动 | 移动悬浮窗（无边框窗口的拖动方式） |
+| 右键单击 | 弹出菜单，可选择「退出」 |
+
+窗口默认出现在屏幕右上角（`SM_CXSCREEN - 320, 20`），始终置顶、不在任务栏显示、不抢占焦点。
+
+## 项目结构
+
+```
+src/
+├── main.rs   # Win32 窗口、消息循环、GDI 绘制、布局与状态管理
+├── cpu.rs    # CPU 占用统计（GetSystemTimes 差分）
+└── gpu.rs    # GPU 占用统计（PDH 性能计数器 + 实例聚合）
+```
+
+整份代码仅三个源文件。`main.rs` 顶部的常量集中了全部外观参数：刷新间隔、格子宽度、圆角半径、配色等，修改那里即可调整视觉效果，不必改动绘制逻辑。
+
+注意 `src/main.rs` 首行的 `#![windows_subsystem = "windows"]` 使程序以 GUI 子系统运行，`println!` / `dbg!` 不会产生任何可见输出；调试时请改用 `MessageBoxW` 或临时注释掉该属性。
+
+## 已知限制
+
+- 仅支持 Windows 平台。
+- GPU 实例的解析依赖 Windows 的 PDH 命名格式（`pid_..._luid_<luid>_phys_<...>_engtype_<...>`）；若微软变更该格式，`src/gpu.rs` 中的实例名切片逻辑需要同步调整。
+- 依赖版本在 `Cargo.toml` 中被刻意固定（`windows` 0.58），因为该 crate 各版本间 API 变动较大，升级后可能需要修改调用代码。
