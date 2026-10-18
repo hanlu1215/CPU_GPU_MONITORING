@@ -30,7 +30,6 @@ use render::{BrushGuard, FontGuard, PathGuard};
 const TIMER_ID: usize = 1;
 const INTERVAL_MS: u32 = 1000; // 刷新间隔
 const GPU_REFRESH_EVERY: u32 = 60; // 每 N 次采样重建一次 GPU 查询
-const HOT: f64 = 95.0; // 达到该百分比视为满载，变红
 
 // ---------- 布局（设计像素，运行时按系统 DPI 缩放）----------
 const OUTER_MARGIN: f32 = 8.0; // 卡片外的透明留白：圆角抗锯齿和描边需要它
@@ -49,12 +48,16 @@ const PILL_FONT_PX: f32 = 13.0;
 const C_TOP: u32 = 0xFF2C2F38; // 卡片渐变起始
 const C_BOTTOM: u32 = 0xFF1A1C21; // 卡片渐变结束
 const C_BORDER: u32 = 0xFF4E5460; // 描边
-const C_NUM: u32 = 0xFF5AA9FF; // 数字：蓝
-const C_NUM_HOT: u32 = 0xFFFF5F5F; // 满载：红
-const C_PILL: u32 = 0xFF16301F; // 胶囊底
-const C_PILL_TXT: u32 = 0xFF4EDE9A; // 胶囊字：绿
-const C_PILL_HOT: u32 = 0xFF3A1E1E;
-const C_PILL_TXT_HOT: u32 = 0xFFFF7070;
+
+// 负载分级配色：0~25% 绿 → 25~50% 蓝 → 50~75% 黄 → 75~100% 红
+const BAND_STOPS: [f64; 3] = [25.0, 50.0, 75.0];
+const C_NUM: [u32; 4] = [0xFF4EDE9A, 0xFF5AA9FF, 0xFFFFD24A, 0xFFFF5F5F];
+const C_PILL: [u32; 4] = [0xFF16301F, 0xFF16283A, 0xFF3A3016, 0xFF3A1E1E];
+const C_PILL_TXT: [u32; 4] = [0xFF4EDE9A, 0xFF5AA9FF, 0xFFFFD24A, 0xFFFF7070];
+// 无数据（GPU N/A）：中性灰
+const C_NUM_NA: u32 = 0xFF9AA3B2;
+const C_PILL_NA: u32 = 0xFF2A2E38;
+const C_PILL_TXT_NA: u32 = 0xFF9AA3B2;
 
 const ID_EXIT: usize = 1;
 
@@ -62,7 +65,24 @@ const ID_EXIT: usize = 1;
 struct Cell {
     label: String, // CPU / GPU
     value: String, // 41%
-    hot: bool,
+    pct: f64,      // 数值本身；负数表示无数据，决定配色档位
+}
+
+/// 0~25% → 0；25~50% → 1；50~75% → 2；75~100% → 3
+fn band(pct: f64) -> usize {
+    if pct < 0.0 {
+        return 0;
+    }
+    BAND_STOPS.iter().filter(|&&s| pct >= s).count()
+}
+
+/// 无数据时用中性灰，有数据时按档位取色
+fn colors(pct: f64) -> (u32, u32, u32) {
+    if pct < 0.0 {
+        return (C_NUM_NA, C_PILL_NA, C_PILL_TXT_NA);
+    }
+    let i = band(pct);
+    (C_NUM[i], C_PILL[i], C_PILL_TXT[i])
 }
 
 struct State {
@@ -82,7 +102,7 @@ thread_local! {
 }
 
 fn cell(label: &str, v: f64) -> Cell {
-    Cell { label: label.to_string(), value: format!("{:.0}%", v), hot: v >= HOT }
+    Cell { label: label.to_string(), value: format!("{:.0}%", v), pct: v }
 }
 
 fn build_cells(cpu: f64, gpus: Option<&[f64]>) -> Vec<Cell> {
@@ -94,7 +114,7 @@ fn build_cells(cpu: f64, gpus: Option<&[f64]>) -> Vec<Cell> {
                 v.push(cell(&format!("GPU{}", i), *x));
             }
         }
-        _ => v.push(Cell { label: "GPU".into(), value: "N/A".into(), hot: false }),
+        _ => v.push(Cell { label: "GPU".into(), value: "N/A".into(), pct: -1.0 }),
     }
     v
 }
@@ -209,6 +229,7 @@ unsafe fn draw(hwnd: HWND, st: &mut State) {
     for (i, c) in st.cells.iter().enumerate() {
         let x0 = left + PAD_X * s + i as f32 * (st.cell_w + GAP * s);
         let cell_cx = x0 + st.cell_w / 2.0;
+        let (num_color, pill_bg, pill_text) = colors(c.pct);
 
         // 大数字
         render::draw_centered_text(
@@ -216,7 +237,7 @@ unsafe fn draw(hwnd: HWND, st: &mut State) {
             &c.value,
             big.0,
             &big_m,
-            if c.hot { C_NUM_HOT } else { C_NUM },
+            num_color,
             cell_cx,
             top + (TOP + NUM_H / 2.0) * s,
         );
@@ -226,7 +247,7 @@ unsafe fn draw(hwnd: HWND, st: &mut State) {
         let pill_h = PILL_H * s;
         if let Some(pill) = PathGuard::new() {
             render::add_rounded_rect(pill.0, x0, pill_top, st.cell_w, pill_h, pill_h.min(st.cell_w) / 2.0);
-            if let Some(brush) = BrushGuard::solid(if c.hot { C_PILL_HOT } else { C_PILL }) {
+            if let Some(brush) = BrushGuard::solid(pill_bg) {
                 render::fill_path(g, &brush, &pill);
             }
         }
@@ -235,7 +256,7 @@ unsafe fn draw(hwnd: HWND, st: &mut State) {
             &c.label,
             small.0,
             &small_m,
-            if c.hot { C_PILL_TXT_HOT } else { C_PILL_TXT },
+            pill_text,
             cell_cx,
             pill_top + pill_h / 2.0,
         );
