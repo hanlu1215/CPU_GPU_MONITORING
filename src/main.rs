@@ -19,7 +19,7 @@ use windows::Win32::Graphics::GdiPlus::{
 use windows::Win32::Graphics::GdiPlus::Ok as GDIP_OK;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+    CreateMutexW, GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -30,6 +30,7 @@ use render::{BrushGuard, FontGuard, PathGuard};
 const TIMER_ID: usize = 1;
 const INTERVAL_MS: u32 = 1000; // 刷新间隔
 const GPU_REFRESH_EVERY: u32 = 60; // 每 N 次采样重建一次 GPU 查询
+const TOPMOST_REFRESH_EVERY: u32 = 60; // 每 N 秒重申一次置顶（约 1 分钟）
 
 // ---------- 布局（设计像素，运行时按系统 DPI 缩放）----------
 const OUTER_MARGIN: f32 = 8.0; // 卡片外的透明留白：圆角抗锯齿和描边需要它
@@ -272,6 +273,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 STATE.with(|s| {
                     if let Some(st) = s.borrow_mut().as_mut() {
                         st.tick += 1;
+                        // 定期重申置顶：有的程序会反复把自己提到最前，把我们压下去
+                        if st.tick % TOPMOST_REFRESH_EVERY == 0 {
+                            let _ = SetWindowPos(
+                                hwnd,
+                                HWND_TOPMOST,
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                            );
+                        }
                         if st.tick % GPU_REFRESH_EVERY == 0 {
                             st.gpu = gpu::GpuMonitor::new();
                         }
@@ -345,12 +358,35 @@ unsafe fn measure_cell_w(graphics: *mut windows::Win32::Graphics::GdiPlus::GpGra
     (w_big.max(w_small + 28.0 * scale) + 4.0 * scale).max(24.0)
 }
 
+/// 单实例：通过命名互斥体判断是否已有实例在跑，
+/// 有则向旧窗口发 WM_CLOSE 让它退出，新实例接管；返回互斥体句柄，需存活到进程退出。
+unsafe fn take_over_previous_instance() -> Option<HANDLE> {
+    let mutex = CreateMutexW(None, true, w!("Local\\AAsysmon.SingleInstance")).ok()?;
+    if GetLastError() != ERROR_ALREADY_EXISTS {
+        return Some(mutex);
+    }
+    // 旧实例正在运行：请它关闭（它的 DefWindowProc 会 DestroyWindow 并退出消息循环）
+    if let Ok(old) = FindWindowW(w!("SysMonWindow"), w!("sysmon")) {
+        SendMessageW(old, WM_CLOSE, WPARAM(0), LPARAM(0));
+        // 最多等 2 秒；等不到也不拦着新实例启动（最坏情况是短暂双开）
+        for _ in 0..40 {
+            if FindWindowW(w!("SysMonWindow"), w!("sysmon")).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Some(mutex)
+}
+
 fn main() -> windows::core::Result<()> {
     unsafe {
         // 略低于普通优先级：不抢其他程序的 CPU，又不至于满载时界面卡死不更新
         let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
         // 声明 DPI 感知，否则高分屏上系统会拉伸位图，界面发虚
         let _ = SetProcessDPIAware();
+        // 单实例：再打开程序时关掉旧的，新的接管
+        let single_instance = take_over_previous_instance();
 
         let mut gdiplus_token = 0usize;
         let startup_input = GdiplusStartupInput {
@@ -434,6 +470,9 @@ fn main() -> windows::core::Result<()> {
         }
 
         GdiplusShutdown(gdiplus_token);
+        if let Some(mutex) = single_instance {
+            let _ = CloseHandle(mutex);
+        }
     }
     Ok(())
 }
