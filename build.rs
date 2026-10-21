@@ -8,6 +8,9 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // 图标变了要重新跑构建脚本，否则 cargo 会复用旧资源
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/icon.ico");
     // FileDescription 是 Windows 各种列表里显示的「应用程序名」

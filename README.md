@@ -60,7 +60,8 @@ src/
 └── gpu.rs    # GPU 占用统计（PDH 性能计数器 + 实例聚合 + 虚拟显卡过滤）
 build.rs      # 构建期把 assets/icon.ico 与版本信息嵌入 exe（winresource 调用 rc.exe）
 assets/
-└── icon.ico  # 程序图标（16~256 像素多尺寸）
+├── icon.ico  # 程序图标（16~256 像素多尺寸）
+└── make_icon.py  # 图标生成脚本（python assets/make_icon.py 重新生成）
 ```
 
 整份代码仅三个源文件。`main.rs` 顶部的常量集中了全部外观参数：刷新间隔、格子宽度、圆角半径、配色等，修改那里即可调整视觉效果，不必改动绘制逻辑。
